@@ -1,0 +1,571 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Online DRM|HLS Player</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700&family=Material+Icons+Round&display=swap" rel="stylesheet">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/shaka-player/4.3.5/shaka-player.compiled.js"></script>
+    
+    <style>
+        body {
+            font-family: 'Plus Jakarta Sans', sans-serif;
+            background-color: #000;
+            margin: 0; padding: 0;
+            width: 100vw; height: 100vh;
+            overflow: hidden;
+            -webkit-tap-highlight-color: transparent;
+        }
+
+        .glass-panel {
+            background: rgba(15, 11, 28, 0.7);
+            backdrop-filter: blur(16px);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+        }
+        .custom-scroll::-webkit-scrollbar { width: 5px; }
+        .custom-scroll::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.2); border-radius: 4px; }
+        
+        /* Video Controls Visibility Classes */
+        .controls-visible { opacity: 1; pointer-events: none; }
+        .controls-hidden { opacity: 0; pointer-events: none; }
+        .pointer-auto { pointer-events: auto !important; }
+        input[type=range] { z-index: 50; position: relative; }
+
+        /* Floating Input UI Overlay (Workers.dev style) */
+        #input-layer {
+            position: absolute;
+            inset: 0;
+            z-index: 100;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            background: radial-gradient(circle at center, rgba(15, 11, 28, 0.98), #000000);
+            backdrop-filter: blur(12px);
+            transition: opacity 0.6s cubic-bezier(0.4, 0, 0.2, 1), visibility 0.6s;
+        }
+
+        .panel-hidden {
+            opacity: 0;
+            visibility: hidden;
+            pointer-events: none;
+        }
+
+        /* Change Stream Button */
+        #change-stream-btn {
+            position: absolute;
+            top: 1.5rem; right: 1.5rem;
+            z-index: 90;
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.4s ease;
+        }
+        .show-btn {
+            opacity: 1 !important;
+            pointer-events: auto !important;
+        }
+    </style>
+</head>
+<body class="text-gray-100 antialiased selection:bg-indigo-500 selection:text-white">
+
+    <div id="videoContainer" class="absolute inset-0 w-full h-full bg-black select-none flex items-center justify-center">
+        
+        <video id="videoPlayer" class="w-full h-full object-contain transition-all duration-300" crossorigin="anonymous" playsinline autoplay></video>
+
+        <div id="touchCatcher" class="absolute inset-0 z-10 cursor-pointer"></div>
+
+        <div id="loader" class="absolute inset-0 bg-black/60 hidden flex-col items-center justify-center gap-3 transition-opacity duration-300 z-20 pointer-events-none">
+            <div class="w-12 h-12 border-4 border-indigo-500/20 border-t-indigo-500 rounded-full animate-spin"></div>
+            <p class="text-xs text-gray-400 tracking-wider">Optimizing Playback...</p>
+        </div>
+
+        <div id="playerControls" class="absolute inset-0 bg-gradient-to-t from-black/95 via-black/20 to-black/60 flex flex-col justify-between p-3 md:p-4 transition-opacity duration-300 z-30 controls-hidden">
+            
+            <div class="w-full flex items-center justify-between pointer-auto">
+                <span id="videoTitleDisplay" class="text-xs md:text-sm font-medium bg-black/40 px-3 py-1.5 rounded-lg border border-white/5 truncate max-w-[65%]">Live Stream</span>
+                <button id="badgeFormat" class="text-[10px] font-bold uppercase tracking-widest bg-red-600 text-white px-2.5 py-1 rounded shadow-[0_0_8px_rgba(220,38,38,0.6)] transition-all pointer-auto">OFFLINE</button>
+            </div>
+
+            <div class="flex-grow"></div>
+
+            <div class="w-full flex flex-col gap-3 pointer-auto">
+                <div class="flex items-center gap-3 w-full">
+                    <input type="range" id="progressBar" min="0" max="100" value="0" class="w-full h-1.5 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-indigo-500 focus:outline-none transition-all">
+                </div>
+
+                <div class="flex items-center justify-between">
+                    <div class="flex items-center gap-2 md:gap-4">
+                        <button id="ctrlPlayPause" class="text-gray-300 hover:text-white p-1 md:p-0 transition-colors cursor-pointer pointer-auto"><span class="material-icons-round text-2xl md:text-3xl">play_arrow</span></button>
+                        
+                        <div class="flex items-center gap-2 group/volume">
+                            <button id="ctrlMute" class="text-gray-300 hover:text-white p-1 md:p-0 transition-colors cursor-pointer pointer-auto"><span class="material-icons-round text-xl md:text-2xl">volume_up</span></button>
+                            <input type="range" id="volumeSlider" min="0" max="1" step="0.1" value="1" class="w-12 md:w-0 md:group-hover/volume:w-16 focus:w-16 h-1 bg-gray-600 rounded-lg appearance-none cursor-pointer accent-indigo-400 transition-all duration-300 pointer-auto">
+                        </div>
+
+                        <div class="text-[10px] md:text-sm text-gray-400 font-mono flex gap-1 ml-1 md:ml-0 pointer-events-none">
+                            <span id="currentTime">00:00</span> <span id="timeDivider">/</span> <span id="durationTime">00:00</span>
+                        </div>
+                    </div>
+
+                    <div class="flex items-center gap-1 md:gap-3 relative">
+                        <button id="btnSettings" class="text-gray-300 hover:text-white p-1.5 md:p-1 transition-all transform hover:rotate-45 duration-300 cursor-pointer pointer-auto"><span class="material-icons-round text-xl md:text-2xl">settings</span></button>
+                        <button id="btnPip" class="text-gray-300 hover:text-white p-1.5 md:p-1 transition-colors cursor-pointer pointer-auto"><span class="material-icons-round text-xl md:text-2xl">picture_in_picture_alt</span></button>
+                        <button id="btnFullscreen" class="text-gray-300 hover:text-white p-1.5 md:p-1 transition-colors cursor-pointer pointer-auto"><span class="material-icons-round text-2xl md:text-3xl">fullscreen</span></button>
+
+                        <div id="settingsPanel" class="absolute bottom-12 right-0 glass-panel border border-white/10 w-48 md:w-60 rounded-xl p-3 hidden shadow-2xl flex flex-col gap-2 transition-all duration-200 text-xs z-50 pointer-auto">
+                            <div>
+                                <span class="text-[10px] text-gray-400 font-bold uppercase tracking-wider block mb-1">Resolution</span>
+                                <select id="selectResolution" class="w-full bg-black/50 border border-gray-700/60 rounded px-2 py-1.5 md:py-1 focus:outline-none custom-scroll"></select>
+                            </div>
+                            <div>
+                                <span class="text-[10px] text-gray-400 font-bold uppercase tracking-wider block mb-1">Audio</span>
+                                <select id="selectAudio" class="w-full bg-black/50 border border-gray-700/60 rounded px-2 py-1.5 md:py-1 focus:outline-none"></select>
+                            </div>
+                            <div>
+                                <span class="text-[10px] text-gray-400 font-bold uppercase tracking-wider block mb-1">Speed</span>
+                                <select id="selectSpeed" class="w-full bg-black/50 border border-gray-700/60 rounded px-2 py-1.5 md:py-1 focus:outline-none">
+                                    <option value="0.5">0.5x</option>
+                                    <option value="1" selected>Normal (1.0x)</option>
+                                    <option value="1.5">1.5x</option>
+                                    <option value="2">2.0x</option>
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <button id="change-stream-btn" onclick="showInputPanel()" class="bg-black/60 hover:bg-black/90 text-white border border-white/10 py-2 px-3.5 rounded-lg backdrop-blur-md flex items-center gap-2 shadow-lg hover:border-indigo-500/50 transition-all pointer-events-none">
+        <span class="material-icons-round text-sm">swap_horiz</span>
+        <span class="text-xs font-bold uppercase tracking-wider">Change Stream</span>
+    </button>
+
+    <div id="input-layer">
+        <header class="w-full max-w-4xl mx-auto px-4 text-center mb-8">
+            <h1 class="text-4xl md:text-5xl font-extrabold tracking-tight bg-gradient-to-r from-indigo-400 via-purple-400 to-pink-400 bg-clip-text text-transparent drop-shadow-sm">
+                Online DRM|HLS Player
+            </h1>
+            <p class="text-sm md:text-base text-gray-400 mt-2 font-medium">
+                Developed by 
+                <a href="https://www.facebook.com/NasimAktar786" target="_blank" rel="noopener noreferrer" class="text-indigo-400 hover:text-indigo-300 transition-colors duration-200 underline underline-offset-4 decoration-indigo-500/50">
+                    Nasim Aktar
+                </a>
+            </p>
+        </header>
+
+        <div class="w-full max-w-2xl px-4">
+            <div class="glass-panel border border-white/10 rounded-2xl p-5 md:p-8 shadow-2xl">
+                <div class="mb-2">
+                    <label for="streamUrl" class="block text-xs font-semibold uppercase tracking-wider text-gray-400 mb-3">Streaming Manifest Link</label>
+                    <div class="relative flex flex-col sm:flex-row gap-3">
+                        <input type="text" id="streamUrl" 
+                               placeholder="Paste URL (e.g., https://...manifest.mpd?|drmScheme=clearkey&drmLicense=KID:KEY)" 
+                               class="w-full bg-black/50 border border-gray-700/60 rounded-xl px-4 py-4 text-sm focus:outline-none focus:border-indigo-500 text-gray-200 placeholder-gray-600 transition-colors">
+                        <button onclick="executeStreamRouteAction()" class="sm:w-40 bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-sm px-6 py-4 rounded-xl flex items-center justify-center gap-2 cursor-pointer shadow-lg active:scale-95 transition-all">
+                            <span class="material-icons-round">play_arrow</span> Play
+                        </button>
+                    </div>
+                </div>
+                
+                <div class="flex items-start gap-3 bg-indigo-950/30 border border-indigo-500/20 rounded-xl p-3.5 mt-5">
+                    <span class="material-icons-round text-indigo-400 shrink-0 mt-0.5">verified_user</span>
+                    <div class="text-xs md:text-sm text-gray-300 space-y-1">
+                        <p class="font-semibold text-indigo-300">Clean Playback Environment</p>
+                        <p class="text-gray-400">Ads and popups disabled. Shaka Engine initialized. Paste link and watch directly in full-screen.</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <footer class="absolute bottom-6 w-full text-center text-[11px] md:text-xs text-gray-500 tracking-wide font-medium">
+            &copy; 2026 Core Digital Media Streaming Sandbox Engine. All Rights Reserved.
+        </footer>
+    </div>
+
+    <script>
+        let playerInstance = null;
+        const videoElement = document.getElementById('videoPlayer');
+        const containerVideoFrame = document.getElementById('videoContainer');
+        const loader = document.getElementById('loader');
+        
+        const playerControls = document.getElementById('playerControls');
+        const settingsPanel = document.getElementById('settingsPanel');
+        const touchCatcher = document.getElementById('touchCatcher');
+        let uiTimeout;
+        window.isClearKeyForced = false;
+
+        // UI Panel Management
+        function showInputPanel() {
+            document.getElementById('input-layer').classList.remove('panel-hidden');
+            document.getElementById('change-stream-btn').classList.remove('show-btn');
+            if (playerInstance && !videoElement.paused) videoElement.pause();
+        }
+
+        function hideInputPanel() {
+            document.getElementById('input-layer').classList.add('panel-hidden');
+            document.getElementById('change-stream-btn').classList.add('show-btn');
+        }
+
+        // Shaka Video Controls Management
+        function wakeUpControls(duration = 3500) {
+            playerControls.classList.remove('controls-hidden');
+            playerControls.classList.add('controls-visible');
+            clearTimeout(uiTimeout);
+            
+            if (!videoElement.paused && settingsPanel.classList.contains('hidden')) {
+                uiTimeout = setTimeout(() => {
+                    playerControls.classList.remove('controls-visible');
+                    playerControls.classList.add('controls-hidden');
+                }, duration);
+            }
+        }
+
+        touchCatcher.addEventListener('click', () => {
+            if (playerControls.classList.contains('controls-hidden')) {
+                wakeUpControls(3500);
+            } else {
+                if (videoElement.paused) videoElement.play();
+                else videoElement.pause();
+                wakeUpControls(3500);
+            }
+        });
+
+        playerControls.addEventListener('mousemove', () => wakeUpControls(3500));
+        playerControls.addEventListener('touchstart', () => wakeUpControls(3500));
+
+        videoElement.addEventListener('play', () => {
+            document.getElementById('ctrlPlayPause').innerHTML = '<span class="material-icons-round text-2xl md:text-3xl">pause</span>';
+            wakeUpControls(10000); 
+        });
+
+        videoElement.addEventListener('pause', () => {
+            document.getElementById('ctrlPlayPause').innerHTML = '<span class="material-icons-round text-2xl md:text-3xl">play_arrow</span>';
+            wakeUpControls(0); 
+        });
+
+        // URL Parser
+        function parseStreamingMetadata(inputString) {
+            let rawInput = inputString.trim().replace(/%7C/gi, '|');
+            let manifestUrl = rawInput;
+            let drmConfig = null;
+            let urlParams = null;
+
+            if (rawInput.includes('|')) {
+                let parts = rawInput.split('|');
+                manifestUrl = parts[0];
+                if (manifestUrl.endsWith('?')) manifestUrl = manifestUrl.slice(0, -1);
+                urlParams = new URLSearchParams(parts.slice(1).join('|'));
+            } else if (rawInput.includes('?')) {
+                let parts = rawInput.split('?');
+                let possibleParams = new URLSearchParams(parts[1]);
+                if (possibleParams.has('drmScheme') || possibleParams.has('drmLicense') || possibleParams.has('kid')) {
+                    manifestUrl = parts[0]; 
+                    urlParams = possibleParams;
+                }
+            }
+
+            if (urlParams) {
+                const scheme = urlParams.get('drmScheme') || urlParams.get('drm');
+                const license = urlParams.get('drmLicense') || urlParams.get('license');
+                const kid = urlParams.get('kid');
+                const key = urlParams.get('key');
+                const cleanHex = (str) => str.trim().replace(/-/g, '');
+
+                if (kid && key) {
+                    drmConfig = { type: 'clearkey', kid: cleanHex(kid), key: cleanHex(key) };
+                } else if (scheme && license) {
+                    if (scheme.toLowerCase() === 'clearkey' && license.includes(':')) {
+                        const licenseParts = license.split(':');
+                        drmConfig = { type: 'clearkey', kid: cleanHex(licenseParts[0]), key: cleanHex(licenseParts[1]) };
+                    } else if (scheme.toLowerCase() === 'clearkey') {
+                        drmConfig = { type: 'license_server', scheme: 'org.w3.clearkey', url: license };
+                    } else if (scheme.toLowerCase() === 'widevine') {
+                        drmConfig = { type: 'license_server', scheme: 'com.widevine.alpha', url: license };
+                    }
+                }
+            }
+            return { manifestUrl, drmConfig };
+        }
+
+        // Shaka Setup & Amazon DRM Interceptor
+        async function initPlayerCoreEngine() {
+            shaka.polyfill.installAll();
+            if (!shaka.Player.isBrowserSupported()) {
+                alert('Device browser lacks extension sets required for secure playback.');
+                return;
+            }
+
+            playerInstance = new shaka.Player(videoElement);
+
+            // DOMParser Interceptor for Amazon ClearKey mapping
+            playerInstance.getNetworkingEngine().registerResponseFilter((type, response) => {
+                if (type === shaka.net.NetworkingEngine.RequestType.MANIFEST && window.isClearKeyForced) {
+                    try {
+                        let manifestText = new TextDecoder().decode(response.data);
+                        const parser = new DOMParser();
+                        const xmlDoc = parser.parseFromString(manifestText, "application/xml");
+                        const cps = xmlDoc.getElementsByTagNameNS("*", "ContentProtection");
+                        
+                        for (let i = 0; i < cps.length; i++) {
+                            const scheme = cps[i].getAttribute("schemeIdUri");
+                            if (scheme && (scheme.toLowerCase().includes("edef8ba9") || scheme.toLowerCase().includes("9a04f079"))) {
+                                cps[i].setAttribute("schemeIdUri", "urn:uuid:e2719d58-a985-b3c9-781a-b030af78d30e");
+                            }
+                            const psshNodes = cps[i].getElementsByTagNameNS("*", "pssh");
+                            while (psshNodes.length > 0) {
+                                psshNodes[0].parentNode.removeChild(psshNodes[0]);
+                            }
+                        }
+                        
+                        const serializer = new XMLSerializer();
+                        const newManifest = serializer.serializeToString(xmlDoc);
+                        response.data = new TextEncoder().encode(newManifest);
+                    } catch (e) {
+                        console.error("DOM Intercept Failed. Fallback to raw.", e);
+                    }
+                }
+            });
+
+            playerInstance.configure({
+                streaming: {
+                    bufferingGoal: 30, rebufferingGoal: 2, bufferBehind: 15,          
+                    lowLatencyMode: true, jumpLargeGaps: true, inaccurateManifestTolerance: 0,
+                    safeSeekOffset: 4 
+                },
+                manifest: { dash: { ignoreMinBufferTime: true } }
+            });
+
+            playerInstance.addEventListener('error', onPlaybackErrorEvent);
+            playerInstance.addEventListener('buffering', (event) => loader.style.display = event.buffering ? 'flex' : 'none');
+            playerInstance.addEventListener('trackschanged', syncAvailableTracksPanel);
+            playerInstance.addEventListener('variantchanged', selectActiveTrackDropdownNode);
+        }
+
+        async function executeStreamRouteAction() {
+            const rawInputValue = document.getElementById('streamUrl').value;
+            if (!rawInputValue) return alert('Please supply an active video stream link first.');
+
+            loader.style.display = 'flex';
+            hideInputPanel(); // Transition to immersive mode
+
+            const parsedConfig = parseStreamingMetadata(rawInputValue);
+            document.getElementById('videoTitleDisplay').innerText = parsedConfig.manifestUrl.split('/').pop().split('?')[0];
+
+            try {
+                playerInstance.configure({ drm: { servers: {}, clearKeys: {} } });
+
+                if (parsedConfig.drmConfig) {
+                    if (parsedConfig.drmConfig.type === 'clearkey') {
+                        window.isClearKeyForced = true;
+                        playerInstance.configure({ drm: { clearKeys: { [parsedConfig.drmConfig.kid]: parsedConfig.drmConfig.key }, preferredKeySystems: ['org.w3.clearkey'] } });
+                    } else if (parsedConfig.drmConfig.type === 'license_server') {
+                        window.isClearKeyForced = false;
+                        playerInstance.configure({ drm: { servers: { [parsedConfig.drmConfig.scheme]: parsedConfig.drmConfig.url } } });
+                    }
+                } else window.isClearKeyForced = false;
+
+                await playerInstance.load(parsedConfig.manifestUrl);
+                
+                if (playerInstance.isLive()) {
+                    videoElement.currentTime = playerInstance.seekRange().end;
+                }
+
+                try { await videoElement.play(); } 
+                catch(playErr) {
+                    videoElement.muted = true;
+                    document.getElementById('ctrlMute').innerHTML = '<span class="material-icons-round text-xl md:text-2xl">volume_off</span>';
+                    await videoElement.play();
+                }
+
+            } catch (err) { 
+                onPlaybackErrorEvent(err); 
+                showInputPanel(); // Revert to input if fails
+            } 
+            finally { loader.style.display = 'none'; }
+        }
+
+        function onPlaybackErrorEvent(event) {
+            const errorObj = event.detail ? event.detail : event;
+            if (errorObj.code === 6012) alert("Error 6012: Stream is encrypted, but no valid ClearKey credentials could be extracted.");
+            else if (errorObj.code !== 7000) console.error("Playback Error", errorObj);
+        }
+
+        // Shaka Track & Audio Panels
+        function syncAvailableTracksPanel() {
+            const selectRes = document.getElementById('selectResolution');
+            const selectAud = document.getElementById('selectAudio');
+            selectRes.innerHTML = ''; selectAud.innerHTML = '';
+
+            const variants = playerInstance.getVariantTracks();
+            const uniqueResolutions = [];
+            variants.forEach(track => { if (track.height && !uniqueResolutions.some(r => r.height === track.height)) uniqueResolutions.push(track); });
+            uniqueResolutions.sort((a,b) => b.height - a.height);
+
+            selectRes.innerHTML = '<option value="auto">Auto Adaptive</option>';
+            uniqueResolutions.forEach(t => selectRes.innerHTML += `<option value="${t.id}">${t.height}p</option>`);
+
+            [...new Set(variants.map(v => v.language))].forEach(l => {
+                selectAud.innerHTML += `<option value="${l}">${l.toUpperCase() === 'UND' ? 'Default' : l.toUpperCase()}</option>`;
+            });
+        }
+
+        function selectActiveTrackDropdownNode() {
+            const active = playerInstance.getVariantTracks().find(v => v.active);
+            document.getElementById('selectResolution').value = (active && !playerInstance.getConfiguration().abr.enabled) ? active.id : 'auto';
+        }
+
+        // UI Listeners
+        document.getElementById('ctrlPlayPause').addEventListener('click', () => { 
+            videoElement.paused ? videoElement.play() : videoElement.pause(); 
+            wakeUpControls(); 
+        });
+
+        const ctrlMute = document.getElementById('ctrlMute');
+        const volumeSlider = document.getElementById('volumeSlider');
+        ctrlMute.addEventListener('click', () => {
+            videoElement.muted = !videoElement.muted;
+            ctrlMute.innerHTML = videoElement.muted ? '<span class="material-icons-round text-xl md:text-2xl">volume_off</span>' : '<span class="material-icons-round text-xl md:text-2xl">volume_up</span>';
+            volumeSlider.value = videoElement.muted ? 0 : videoElement.volume;
+            wakeUpControls();
+        });
+        volumeSlider.addEventListener('input', (e) => {
+            videoElement.volume = e.target.value;
+            videoElement.muted = e.target.value == 0;
+            ctrlMute.innerHTML = videoElement.muted ? '<span class="material-icons-round text-xl md:text-2xl">volume_off</span>' : '<span class="material-icons-round text-xl md:text-2xl">volume_up</span>';
+            wakeUpControls();
+        });
+
+        // Timeline & Go Live logic
+        const badge = document.getElementById('badgeFormat');
+        badge.addEventListener('click', () => {
+            if (playerInstance && playerInstance.isLive()) {
+                videoElement.currentTime = playerInstance.seekRange().end;
+                videoElement.play();
+                wakeUpControls();
+            }
+        });
+
+        videoElement.addEventListener('timeupdate', () => {
+            if (playerInstance && playerInstance.isLive()) {
+                const liveEdge = playerInstance.seekRange().end;
+                const seekStart = playerInstance.seekRange().start;
+                const distance = liveEdge - videoElement.currentTime;
+                
+                if (distance > 12) {
+                    badge.innerText = 'GO LIVE';
+                    badge.className = 'text-[10px] font-bold uppercase tracking-widest bg-gray-600 hover:bg-gray-500 cursor-pointer text-white px-2.5 py-1 rounded shadow-lg pointer-auto transition-colors';
+                } else {
+                    badge.innerText = '● LIVE';
+                    badge.className = 'text-[10px] font-bold uppercase tracking-widest bg-red-600 text-white px-2.5 py-1 rounded shadow-[0_0_8px_rgba(220,38,38,0.8)] animate-pulse pointer-events-none cursor-default';
+                }
+
+                const liveProgress = ((videoElement.currentTime - seekStart) / (liveEdge - seekStart)) * 100;
+                document.getElementById('progressBar').value = isNaN(liveProgress) ? 100 : liveProgress;
+                document.getElementById('currentTime').innerText = formatTimeLayout(videoElement.currentTime - seekStart);
+                document.getElementById('timeDivider').innerText = "-";
+                document.getElementById('durationTime').innerText = "LIVE";
+            } else {
+                const progress = (videoElement.currentTime / videoElement.duration) * 100;
+                document.getElementById('progressBar').value = isNaN(progress) ? 0 : progress;
+                document.getElementById('timeDivider').innerText = "/";
+                document.getElementById('currentTime').innerText = formatTimeLayout(videoElement.currentTime);
+                document.getElementById('durationTime').innerText = isNaN(videoElement.duration) ? "00:00" : formatTimeLayout(videoElement.duration);
+            }
+        });
+
+        document.getElementById('progressBar').addEventListener('input', (e) => {
+            if (playerInstance.isLive()) {
+                const seekStart = playerInstance.seekRange().start;
+                const liveEdge = playerInstance.seekRange().end;
+                videoElement.currentTime = seekStart + (e.target.value / 100) * (liveEdge - seekStart);
+            } else {
+                videoElement.currentTime = (e.target.value / 100) * videoElement.duration;
+            }
+            wakeUpControls();
+        });
+
+        function formatTimeLayout(secs) {
+            if (!secs || secs < 0) return "00:00";
+            const h = Math.floor(secs / 3600), m = Math.floor((secs % 3600) / 60), s = Math.floor(secs % 60);
+            return `${h > 0 ? h + ':' : ''}${m < 10 ? '0' + m : m}:${s < 10 ? '0' + s : s}`;
+        }
+
+        // Settings Panel Interactivity
+        document.getElementById('btnSettings').addEventListener('click', (e) => {
+            e.stopPropagation();
+            settingsPanel.classList.toggle('hidden');
+            wakeUpControls();
+        });
+        
+        document.addEventListener('click', (e) => { 
+            if(!settingsPanel.contains(e.target) && e.target.id !== 'btnSettings' && e.target.parentNode.id !== 'btnSettings') {
+                settingsPanel.classList.add('hidden'); 
+            }
+        });
+
+        document.getElementById('selectResolution').addEventListener('change', (e) => {
+            if (e.target.value === 'auto') playerInstance.configure({ abr: { enabled: true } });
+            else {
+                playerInstance.configure({ abr: { enabled: false } });
+                const selectedTrack = playerInstance.getVariantTracks().find(t => t.id == e.target.value);
+                if (selectedTrack) playerInstance.selectVariantTrack(selectedTrack, true);
+            }
+        });
+        document.getElementById('selectAudio').addEventListener('change', (e) => playerInstance.selectAudioLanguage(e.target.value));
+        document.getElementById('selectSpeed').addEventListener('change', (e) => videoElement.playbackRate = parseFloat(e.target.value));
+
+        // PiP & Smart Landscape Fullscreen
+        document.getElementById('btnPip').addEventListener('click', async () => {
+            try {
+                if (videoElement !== document.pictureInPictureElement) await videoElement.requestPictureInPicture();
+                else await document.exitPictureInPicture();
+            } catch (err) {}
+        });
+
+        const btnFullscreen = document.getElementById('btnFullscreen');
+        
+        async function toggleFullscreen() {
+            const isFullscreen = document.fullscreenElement || document.webkitFullscreenElement;
+
+            if (!isFullscreen) {
+                try {
+                    if (containerVideoFrame.requestFullscreen) {
+                        await containerVideoFrame.requestFullscreen();
+                    } else if (containerVideoFrame.webkitRequestFullscreen) {
+                        await containerVideoFrame.webkitRequestFullscreen();
+                    }
+                    if (screen.orientation && screen.orientation.lock) {
+                        await screen.orientation.lock('landscape').catch(() => {});
+                    }
+                    videoElement.classList.replace('object-contain', 'object-cover');
+                    btnFullscreen.innerHTML = '<span class="material-icons-round text-2xl md:text-3xl">fullscreen_exit</span>';
+                } catch (err) {
+                    if (videoElement.webkitEnterFullscreen) videoElement.webkitEnterFullscreen();
+                }
+            } else {
+                try {
+                    if (document.exitFullscreen) await document.exitFullscreen();
+                    else if (document.webkitExitFullscreen) await document.webkitExitFullscreen();
+                } catch(err) {}
+            }
+            wakeUpControls();
+        }
+
+        btnFullscreen.addEventListener('click', toggleFullscreen);
+
+        document.addEventListener('fullscreenchange', () => {
+            if (!document.fullscreenElement) {
+                if (screen.orientation && screen.orientation.unlock) screen.orientation.unlock();
+                videoElement.classList.replace('object-cover', 'object-contain');
+                btnFullscreen.innerHTML = '<span class="material-icons-round text-2xl md:text-3xl">fullscreen</span>';
+            }
+        });
+
+        // Init Engine
+        document.addEventListener('DOMContentLoaded', initPlayerCoreEngine);
+    </script>
+</body>
+</html>
